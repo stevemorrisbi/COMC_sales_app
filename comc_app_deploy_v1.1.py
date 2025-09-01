@@ -6,7 +6,9 @@ import requests
 from datetime import datetime, timedelta
 import matplotlib.dates as mdates
 from matplotlib.ticker import MaxNLocator
+import matplotlib.colors as mcolors
 import numpy as np
+from dateutil import parser as du
 
 
 st.set_page_config(layout="wide")
@@ -51,7 +53,7 @@ section[data-testid="stSidebar"] .stTextInput {{ margin-bottom: .5rem; }}
 /* Inputs */
 div[data-baseweb="select"] > div,
 .stDateInput input[type="text"],
-.stNumberInput input, .stTextInput input,
+.StNumberInput input, .stTextInput input,
 .stMultiSelect, .stSelectbox {{
   background-color: {COMC_CONTROL} !important;
   color: {COMC_TEXT} !important;
@@ -146,31 +148,12 @@ div[role="presentation"][style*="opacity"] {{
   background: {COMC_BG} !important;
 }}
 /* Hide the element toolbar / fullscreen across Streamlit versions */
-
-/* Current toolbar container */
-html body [data-testid="stElementToolbar"] {{
-  display: none !important;
-}}
-
-/* Older fullscreen button selectors */
-html body [data-testid="StyledFullScreenButton"] {{
-  display: none !important;
-}}
-html body button[title="View fullscreen"] {{
-  display: none !important;
-}}
-html body button[aria-label="View fullscreen"] {{
-  display: none !important;
-}}
-html body [role="button"][aria-label="View fullscreen"] {{
-  display: none !important;
-}}
-
-/* Very defensive fallback (anything that says 'full screen') */
-html body button[aria-label*="full"] {{
-  display: none !important;
-}}
-
+html body [data-testid="stElementToolbar"] {{ display: none !important; }}
+html body [data-testid="StyledFullScreenButton"] {{ display: none !important; }}
+html body button[title="View fullscreen"] {{ display: none !important; }}
+html body button[aria-label="View fullscreen"] {{ display: none !important; }}
+html body [role="button"][aria-label="View fullscreen"] {{ display: none !important; }}
+html body button[aria-label*="full"] {{ display: none !important; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -256,6 +239,35 @@ def get_usd_to_gbp() -> float:
 def fmt_currency(series: pd.Series, symbol: str) -> pd.Series:
     return series.apply(lambda x: f"{symbol}{x:,.2f}" if pd.notna(x) else "")
 
+def parse_mixed_timestamps(series: pd.Series) -> pd.Series:
+    """
+    Robustly parse mixed timestamp strings:
+    - 'm/d/Y H:M(:S) AM/PM'
+    - 'm/d/Y HH:MM'
+    - 'd/m/Y HH:MM'
+    Returns tz-naive pandas datetimes (no timezone yet).
+    """
+    def _try_parse(x: str):
+        if pd.isna(x):
+            return pd.NaT
+        s = str(x).strip()
+        if not s:
+            return pd.NaT
+        # 1) Try US month/day first (handles AM/PM + 24h)
+        try:
+            return du.parse(s, dayfirst=False, fuzzy=False)
+        except Exception:
+            pass
+        # 2) Try day-first
+        try:
+            return du.parse(s, dayfirst=True,  fuzzy=False)
+        except Exception:
+            return pd.NaT
+
+    parsed = series.apply(_try_parse)
+    return pd.to_datetime(parsed, errors="coerce")
+
+
 # ---- KPI helpers ----
 def fmt_int(n):
     try:
@@ -283,22 +295,19 @@ def kpi_card_html(title, value, sub=None, accent="volume", delta=None, delta_is_
     </div>
     """
 
+
 # ---------------------------- App ----------------------------
 def main():
-    #st.title("The COMC Seller Dashboard Tool")
     st.markdown(
-    "<h1 style='text-align: center;'>The COMC Seller Dashboard Tool</h1>",
-    unsafe_allow_html=True
-)
-
-    #st.caption("Use the sidebar to set filters and currency.")
+        "<h1 style='text-align: center;'>The COMC Seller Dashboard Tool</h1>",
+        unsafe_allow_html=True
+    )
     st.markdown(
-    "<p style='text-align: center; color: gray; font-size: 0.85rem;'>"
-    "Use the sidebar to set filters and currency."
-    "</p>",
-    unsafe_allow_html=True
-)
-
+        "<p style='text-align: center; color: gray; font-size: 0.85rem;'>"
+        "Use the sidebar to set filters and currency."
+        "</p>",
+        unsafe_allow_html=True
+    )
 
     files = st.file_uploader(
         "Upload one or more COMC Sales History CSV files",
@@ -439,6 +448,18 @@ def main():
             st.warning("No sports selected; nothing to show.")
             st.stop()
 
+    # --- Heatmap options (sidebar) ---
+    with st.sidebar.expander("Heatmap options", expanded=True):
+        tz_labels = {"America/Los_Angeles": "Los Angeles", "Europe/London": "London"}
+        tz_choice = st.radio(
+            "Timezone:",
+            list(tz_labels.keys()),
+            index=0,
+            horizontal=True,
+            format_func=lambda k: tz_labels[k],
+            key="heatmap_tz",
+        )
+
     # -------- KPI row --------
     added_mask = filtered["purchase price"].isna()
     added_sold = int(added_mask.sum())
@@ -521,56 +542,22 @@ def main():
         "axes.facecolor": COMC_BG,
     })
 
-    #st.markdown("#### Sales by Sport")
-    st.markdown(
-    "<h4 style='text-align: center;'>Sales by Sport</h4>",
-    unsafe_allow_html=True
-)
+    st.markdown("<h4 style='text-align: center;'>Sales by Sport</h4>", unsafe_allow_html=True)
 
     counts = filtered["sport"].value_counts()
     if not counts.empty:
         fig, ax = plt.subplots(figsize=(16, 6), facecolor=COMC_BG)
         ax.barh(counts.index, counts.values, color=COMC_RED)
-
-        #ax.set_ylabel("Sport", fontsize=16)        # axis label bigger
-        ax.set_xlabel("Total Sales", fontsize=16)  # axis label bigger
-
-        ax.tick_params(axis="y", labelsize=16)     # y-axis tick labels bigger
-        ax.tick_params(axis="x", labelsize=16)     # x-axis tick labels bigger
+        ax.set_xlabel("Total Sales", fontsize=16)
+        ax.tick_params(axis="y", labelsize=16)
+        ax.tick_params(axis="x", labelsize=16)
         ax.invert_yaxis()
-
-        st.pyplot(fig, use_container_width=True)  # stretch to container width
+        st.pyplot(fig, use_container_width=True)
     else:
         st.write("No data after filters.")
 
-
-    # -------- Top 10 players (Rank, static table) --------
-    # filtered["player_name"] = filtered["description"].apply(extract_name)
-    # top = (
-    #     filtered["player_name"]
-    #     .value_counts()
-    #     .head(10)
-    #     .rename_axis("Name")
-    #     .reset_index(name="Items Sold")
-    # )
-    # top.index = top.index + 1
-    # top.index.name = "Rank"
-
-    # col_left, col_right = st.columns(2)
-    # with col_left:
-    #     st.markdown("#### Top 10 Selling Players")
-    #     st.table(top)
-
-    # with col_right:
-    #     st.markdown("")
-
-
     # ---------- Top Selling Players (card layout, 2 per row) ----------
-
-    # --- Build Top 10 dataset ---
-    # (make sure `filtered` is defined earlier; if not, use df instead)
     filtered["player_name"] = filtered["description"].apply(extract_name)
-
     top = (
         filtered["player_name"]
         .value_counts()
@@ -578,7 +565,6 @@ def main():
         .rename_axis("Name")
         .reset_index(name="Items Sold")
     )
-
     total_items = len(filtered["player_name"])
     top["% of total"] = (top["Items Sold"] / max(total_items, 1) * 100).round(1)
 
@@ -622,15 +608,8 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
-    #st.markdown("#### Top Selling Players")
-    st.markdown(
-    "<h4 style='text-align: center;'>Top Selling Players</h4>",
-    unsafe_allow_html=True
-)
+    st.markdown("<h4 style='text-align: center;'>Top Selling Players</h4>", unsafe_allow_html=True)
 
-
-    # top must have columns: Name, Items Sold, % of total
-    # e.g. from earlier: top = filtered["player_name"].value_counts().head(10)...
     for i in range(0, len(top), 2):
         c1, c2 = st.columns(2)
         for j, col in enumerate((c1, c2)):
@@ -646,9 +625,6 @@ def main():
                 )
                 with col:
                     st.markdown(html, unsafe_allow_html=True)
-
-
-
 
     # ---------- Currency-aware dataset for charts ----------
     nd = filtered.copy()
@@ -668,115 +644,117 @@ def main():
     nd.loc[mask, "markup_pct"] = (nd.loc[mask, "sale price"] - nd.loc[mask, "purchase price"]) / nd.loc[mask, "purchase price"] * 100
 
     # -------- Trend Charts --------
-    #st.header("Trends")
-
-    # Weekly Sales (Count)
-
-    #st.markdown("#### Weekly Sales")
-    st.markdown(
-        "<h4 style='text-align: center;'>Weekly Sales</h4>",
-        unsafe_allow_html=True
-    )
-
+    st.markdown("<h4 style='text-align: center;'>Weekly Sales</h4>", unsafe_allow_html=True)
 
     weekly_sales = nd.groupby(pd.Grouper(key="date sold", freq="W"))["sale price"].size()
     if not weekly_sales.empty:
         fig, ax = plt.subplots(figsize=(16, 6), facecolor=COMC_BG)
         fig.patch.set_alpha(1.0)
-
-        # plot
         ax.bar(weekly_sales.index.to_pydatetime(), weekly_sales.values, color=COMC_RED)
-
-        # labels
-        #ax.set_xlabel("Week", fontsize=12, labelpad=6)
         ax.set_ylabel("Sales Total", fontsize=12)
-
-        # --- prettier date axis ---
-        # Major ticks at month starts, format as short month names: Jun, Jul, Aug
         ax.xaxis.set_major_locator(mdates.MonthLocator())
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
-
-        # Optional minor ticks every 2 weeks (no labels)
         ax.xaxis.set_minor_locator(mdates.WeekdayLocator(byweekday=mdates.MO, interval=2))
-
-        # Smaller tick labels, no rotation
         ax.tick_params(axis="x", which="major", labelsize=9)
         ax.tick_params(axis="x", which="minor", length=0)
-
-        # Remove the ugly year offset text ("2025") that can appear at the right
         ax.xaxis.get_offset_text().set_visible(False)
-
-        # Tight margins so bars touch the plot a bit more neatly
         ax.margins(x=0.01)
-
         st.pyplot(fig)
 
-    # Sales by Day of Week
-    #st.markdown("#### Sales by Day")
-
-    st.markdown(
-    "<h4 style='text-align: center;'>Sales by Day of Week</h4>",
-    unsafe_allow_html=True
-)
+    st.markdown("<h4 style='text-align: center;'>Sales by Day of Week</h4>", unsafe_allow_html=True)
 
     if not nd.empty:
         dow_order = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
         nd["dow"] = nd["date sold"].dt.day_name()
         nd["dow"] = pd.Categorical(nd["dow"], categories=dow_order, ordered=True)
         by_dow = nd["dow"].value_counts().sort_index()
-        
         fig, ax = plt.subplots(facecolor=COMC_BG)
         fig.patch.set_alpha(1.0)
         ax.bar(by_dow.index.astype(str), by_dow.values, color=COMC_RED)
-        
-        #ax.set_xlabel("Day of Week")
         ax.set_ylabel("Total Sales")
         ax.tick_params(axis="x", labelsize=6)
-        
-        # ✅ Force y-axis ticks to be integers
         ax.yaxis.set_major_locator(MaxNLocator(integer=True))
-        
         st.pyplot(fig)
 
-    # Days to Sale – Distribution (Histogram)
-
-    #st.markdown("#### Days to Sale")
-    st.markdown(
-    "<h4 style='text-align: center;'>Days to Sale</h4>",
-    unsafe_allow_html=True
-)
-
+    st.markdown("<h4 style='text-align: center;'>Days to Sale</h4>", unsafe_allow_html=True)
 
     if nd["days_to_sale"].notna().any():
         dts = nd.loc[nd["days_to_sale"] >= 0, "days_to_sale"].dropna()
         fig, ax = plt.subplots(facecolor=COMC_BG)
         fig.patch.set_alpha(1.0)
-        #ax.hist(dts, bins=60, edgecolor=COMC_BORDER, color=COMC_RED)
-        
         ax.set_xlabel("Day number")
         ax.set_ylabel("Total Sales")
-
-        # Plot once; make sure we're counting items, not density
         counts, edges, patches = ax.hist(
             dts, bins=60, density=False, edgecolor=COMC_BORDER, color=COMC_RED
         )
-
-        # Use the heights of the actually drawn bars
         heights = np.array([p.get_height() for p in patches], dtype=float)
         ymax = float(heights.max()) if heights.size else 1.0
-        ax.set_ylim(0, ymax * 1.1)          # ~10% headroom
-
-        #Forcing the X axis to start at 0 in case ther eis any issues with the day number calc
+        ax.set_ylim(0, ymax * 1.1)
         ax.set_xlim(left=0)
-
-                
-        # ✅ Force y-axis ticks to be integers
         ax.yaxis.set_major_locator(MaxNLocator(integer=True))
-
-        
-
-        
         st.pyplot(fig)
+
+    # --- Sales Heatmap ---
+    st.markdown(
+        f"<h4 id='hm-title' style='text-align:center;color:{COMC_RED};'>Sales Heatmap</h4>",
+        unsafe_allow_html=True
+    )
+
+    if not nd.empty and nd["date sold"].notna().any():
+        # Read the sidebar selection; default to LA if not present
+        tz_choice = st.session_state.get("heatmap_tz", "America/Los_Angeles")
+
+        # Parse mixed timestamp formats
+        s = parse_mixed_timestamps(nd["date sold"])
+
+        # Localize to Seattle (source tz), then convert if UK selected
+        s = s.dt.tz_localize("America/Los_Angeles", ambiguous="NaT", nonexistent="NaT")
+        if tz_choice == "Europe/London":
+            s = s.dt.tz_convert("Europe/London")
+
+        # Prepare day-of-week + hour from converted times
+        dow_order = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+        nd_h = nd.copy()
+        nd_h["dow"]  = s.dt.day_name()
+        nd_h["hour"] = s.dt.hour
+        nd_h["dow"]  = pd.Categorical(nd_h["dow"], categories=dow_order, ordered=True)
+
+        # Pivot table → 7x24 grid
+        hours = list(range(24))
+        pivot = (
+            nd_h.pivot_table(index="dow", columns="hour", values="sale price",
+                             aggfunc="size", fill_value=0)
+            .reindex(index=dow_order, columns=hours, fill_value=0)
+        )
+        Z = pivot.values
+
+        # ---- Plot heatmap ----
+        fig, ax = plt.subplots(figsize=(16, 6), facecolor=COMC_BG)
+        fig.patch.set_alpha(1.0)
+
+        cmap = mcolors.LinearSegmentedColormap.from_list("comc_red", ["#FFFFFF", COMC_RED])
+        im = ax.imshow(Z, aspect="auto", origin="upper", cmap=cmap)
+
+        ax.set_yticks(range(len(dow_order)))
+        ax.set_yticklabels(dow_order, fontsize=9)
+        xticks = list(range(0, 24, 2))
+        ax.set_xticks(xticks)
+        ax.set_xticklabels([f"{h:02d}:00" for h in xticks], fontsize=9)
+
+        # Grid
+        ax.set_xticks(np.arange(-0.5, 24, 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, 7, 1), minor=True)
+        ax.grid(which="minor", color=COMC_BORDER, linewidth=0.6)
+        ax.tick_params(which="minor", length=0)
+
+        # Colorbar
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label("Sales count", rotation=90)
+
+        st.pyplot(fig, use_container_width=True)
+    else:
+        st.write("No valid timestamps in 'Date Sold' to build a day/hour heatmap.")
+
 
 if __name__ == "__main__":
     main()
